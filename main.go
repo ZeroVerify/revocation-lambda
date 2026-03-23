@@ -26,7 +26,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		}, nil
 	}
 
-	// TEMP proof check
+	// TEMP proof check, I REPEAT THIS IS FAKE LOL, it is just a place holder for the actual proof verification logic that should be implemented in a real application
 	if body.Proof != "valid" {
 		return events.APIGatewayProxyResponse{
 			StatusCode: http.StatusBadRequest,
@@ -34,7 +34,7 @@ func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		}, nil
 	}
 
-	// simulate revocation
+	// simulate revocation, THIS IS ALSO FAKE. Later it will update DynamoDB (real database) to mark the credential as revoked
 	println("Revoked credential:", body.CredentialID)
 
 	return events.APIGatewayProxyResponse{
