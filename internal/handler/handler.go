@@ -2,8 +2,6 @@ package handler
 
 import (
 	"context"
-	// added (below)
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log"
@@ -14,7 +12,6 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
@@ -22,22 +19,14 @@ import (
 const credentialsTable = "zeroverify-credentials"
 
 type Handler struct {
-	db *dynamodb.Client
+	db      *dynamodb.Client
+	fetcher *verifier.Fetcher
 }
 
 type RequestBody struct {
-	SubjectID          string            `json:"subjectId"`
-	CredentialID       string            `json:"credentialId"`
-	ProofJSON          json.RawMessage   `json:"proofJson"`
-	ExpectedChallenge  string            `json:"expectedChallenge"`
-	Challenge          string            `json:"challenge"`
-	ExpiresAt          int64             `json:"expiresAt"`
-	RevocationIndex    int               `json:"revocationIndex"`
-	BitstringB64       string            `json:"bitstring"`
-	VerificationKeyB64 string            `json:"verificationKey"`
-	BabyJubJubPubKey   string            `json:"babyJubJubPubKey"`
-	Fields             map[string]string `json:"fields"`
-	Signatures         map[string]string `json:"signatures"`
+	SubjectID    string          `json:"subjectId"`
+	CredentialID string          `json:"credentialId"`
+	ProofJSON    json.RawMessage `json:"proofJson"`
 }
 
 type errorResponse struct {
@@ -45,7 +34,10 @@ type errorResponse struct {
 	Message string `json:"message"`
 }
 
-var dbClient *dynamodb.Client
+var (
+	dbClient *dynamodb.Client
+	fetcher  *verifier.Fetcher
+)
 
 func init() {
 	cfg, err := config.LoadDefaultConfig(context.Background())
@@ -53,15 +45,14 @@ func init() {
 		log.Fatalf("failed to load AWS config: %v", err)
 	}
 	dbClient = dynamodb.NewFromConfig(cfg)
+	fetcher = verifier.NewFetcher().Build()
 }
 
 func NewHandler() *Handler {
-	return &Handler{db: dbClient}
+	return &Handler{db: dbClient, fetcher: fetcher}
 }
 
 func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
-
-	// only handle revoke endpoint
 	if req.RequestContext.HTTP.Method != http.MethodPost || req.RequestContext.HTTP.Path != "/api/v1/credentials/revoke" {
 		return errResponse(http.StatusNotFound, "not_found", "endpoint not found"), nil
 	}
@@ -75,32 +66,27 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		return errResponse(http.StatusBadRequest, "invalid_request", "missing required fields"), nil
 	}
 
-	bitstring, err := base64.StdEncoding.DecodeString(body.BitstringB64)
+	vkJSON, err := h.fetcher.VerificationKey(ctx, "credential_revocation")
 	if err != nil {
-		return errResponse(http.StatusBadRequest, "invalid_request", "invalid bitstring"), nil
+		log.Printf("fetching verification key: %v", err)
+		return errResponse(http.StatusInternalServerError, "internal_error", "could not fetch verification key"), nil
 	}
 
-	verificationKey, err := base64.StdEncoding.DecodeString(body.VerificationKeyB64)
+	pubKeyHex, err := h.fetcher.BabyJubJubPublicKey(ctx)
 	if err != nil {
-		return errResponse(http.StatusBadRequest, "invalid_request", "invalid verification key"), nil
+		log.Printf("fetching issuer public key: %v", err)
+		return errResponse(http.StatusInternalServerError, "internal_error", "could not fetch issuer public key"), nil
 	}
 
-	verifyReq := verifier.VerifyRequest{
-		ProofJSON:         body.ProofJSON,
-		ExpectedChallenge: body.ExpectedChallenge,
-		VerificationKey:   verificationKey,
-		Bitstring:         bitstring,
-		BabyJubJubPubKey:  body.BabyJubJubPubKey,
+	verifyResult, err := verifier.Verify(verifier.VerifyRequest{
+		ProofJSON:        body.ProofJSON,
+		VerificationKey:  vkJSON,
+		BabyJubJubPubKey: pubKeyHex,
+		Circuit:          verifier.RevocationCircuit,
 		Inputs: verifier.CircuitInputs{
-			Fields:          body.Fields,
-			Signatures:      body.Signatures,
-			Challenge:       body.Challenge,
-			ExpiresAt:       body.ExpiresAt,
-			RevocationIndex: body.RevocationIndex,
+			CredentialID: body.CredentialID,
 		},
-	}
-
-	verifyResult, err := verifier.Verify(verifyReq)
+	})
 	if err != nil {
 		log.Printf("verify error: %v", err)
 		return errResponse(http.StatusInternalServerError, "internal_error", "verification failed"), nil
@@ -110,7 +96,6 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		return errResponse(http.StatusBadRequest, verifyResult.Reason, "proof invalid"), nil
 	}
 
-	// update DynamoDB (ACTIVE -> REVOKED)
 	_, err = h.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName: aws.String(credentialsTable),
 		Key: map[string]types.AttributeValue{
@@ -122,17 +107,16 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		ExpressionAttributeNames: map[string]string{
 			"#status": "status",
 		},
-		ExpressionAttributeValues: mustMarshalValues(map[string]string{
-			":revoked": "REVOKED",
-			":active":  "ACTIVE",
-		}),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":revoked": &types.AttributeValueMemberS{Value: "REVOKED"},
+			":active":  &types.AttributeValueMemberS{Value: "ACTIVE"},
+		},
 	})
 	if err != nil {
 		var condErr *types.ConditionalCheckFailedException
 		if errors.As(err, &condErr) {
-			return errResponse(http.StatusBadRequest, "already_revoked", "credential not ACTIVE"), nil
+			return errResponse(http.StatusConflict, "already_revoked", "credential is not active"), nil
 		}
-
 		log.Printf("dynamo error: %v", err)
 		return errResponse(http.StatusInternalServerError, "internal_error", "db update failed"), nil
 	}
@@ -140,18 +124,6 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 	return jsonResponse(http.StatusAccepted, map[string]string{
 		"status": "credential revoked",
 	}), nil
-}
-
-func mustMarshalValues(values map[string]string) map[string]types.AttributeValue {
-	out := make(map[string]types.AttributeValue)
-	for k, v := range values {
-		av, err := attributevalue.Marshal(v)
-		if err != nil {
-			panic(err)
-		}
-		out[k] = av
-	}
-	return out
 }
 
 func jsonResponse(status int, body any) events.APIGatewayV2HTTPResponse {
