@@ -1,36 +1,53 @@
-name: Deploy Revocation Lambda
+name: Deploy Lambda
 
 on:
   push:
     branches:
-      - revocation-lambda   # your branch
+      - master   # CHANGED: was told to deploy ONLY on master (not your branch)
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGIONS: "us-east-1"   # Is this right? can expand later if needed???
 
 jobs:
   deploy:
+    name: Build and Deploy
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: "1.22"
 
-      - name: Build Lambda binary
+      - name: Build Lambda
         run: |
-          GOOS=linux GOARCH=amd64 go build -o main main.go
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bootstrap -tags lambda.norpc main.go
+          # CHANGED: renamed zip file to match THIS lambda (not issuer or bitstring)
+          zip revocation-lambda.zip bootstrap
 
-      - name: Zip Lambda
-        run: zip function.zip main
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::043189681060:role/ZeroVerifyGitHubActionsLambdaDeployment
+          aws-region: us-east-1
 
-      - name: Deploy to AWS Lambda
+      - name: Deploy to AWS
         run: |
+          bucket_name="zeroverify-deployment-artifacts-us-east-1"
+
+          aws s3 cp revocation-lambda.zip s3://${bucket_name}/lambda/revocation-lambda.zip --region us-east-1
+
           aws lambda update-function-code \
-            --function-name YOUR_FUNCTION_NAME \ 
-            --zip-file fileb://function.zip \
-            --region YOUR_REGION
+            --function-name zeroverify-revocation \
+            --s3-bucket ${bucket_name} \
+            --s3-key lambda/revocation-lambda.zip \
+            --region us-east-1
 
-# replace YOUR_FUNCTION_NAME and YOUR_REGION with your actual Lambda function name and AWS region. You also need to set up AWS credentials in your GitHub repository secrets for this to work.
-
+          echo "Successfully deployed revocation lambda"
