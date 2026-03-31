@@ -1,0 +1,58 @@
+name: Deploy Lambda
+
+on:
+  push:
+    branches:
+      - master   # CHANGED: was told to deploy ONLY on master (not your branch)
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # Added us-west-2
+  AWS_REGIONS: "us-east-1 us-west-2"
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build Lambda
+        run: |
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bootstrap -tags lambda.norpc main.go
+          zip revocation-lambda.zip bootstrap
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::043189681060:role/ZeroVerifyGitHubActionsLambdaDeployment
+          aws-region: us-east-1
+
+      - name: Deploy to AWS
+        run: |
+          # REQUESTED: Implementation of the 'for loop' to iterate over regions
+          for region in ${AWS_REGIONS}; do
+            echo "Processing region: ${region}"
+            
+            bucket_name="zeroverify-deployment-artifacts-${region}"
+
+            aws s3 cp revocation-lambda.zip s3://${bucket_name}/lambda/revocation-lambda.zip --region ${region}
+
+            aws lambda update-function-code \
+              --function-name zeroverify-revocation \
+              --s3-bucket ${bucket_name} \
+              --s3-key lambda/revocation-lambda.zip \
+              --region ${region}
+              
+            echo "Successfully deployed to ${region}"
+          done
