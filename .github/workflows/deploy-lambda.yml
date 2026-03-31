@@ -10,7 +10,8 @@ permissions:
   contents: read
 
 env:
-  AWS_REGIONS: "us-east-1"   # Is this right? can expand later if needed???
+  # Added us-west-2
+  AWS_REGIONS: "us-east-1 us-west-2"
 
 jobs:
   deploy:
@@ -29,7 +30,6 @@ jobs:
       - name: Build Lambda
         run: |
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o bootstrap -tags lambda.norpc main.go
-          # CHANGED: renamed zip file to match THIS lambda (not issuer or bitstring)
           zip revocation-lambda.zip bootstrap
 
       - name: Configure AWS Credentials
@@ -40,14 +40,19 @@ jobs:
 
       - name: Deploy to AWS
         run: |
-          bucket_name="zeroverify-deployment-artifacts-us-east-1"
+          # REQUESTED: Implementation of the 'for loop' to iterate over regions
+          for region in ${AWS_REGIONS}; do
+            echo "Processing region: ${region}"
+            
+            bucket_name="zeroverify-deployment-artifacts-${region}"
 
-          aws s3 cp revocation-lambda.zip s3://${bucket_name}/lambda/revocation-lambda.zip --region us-east-1
+            aws s3 cp revocation-lambda.zip s3://${bucket_name}/lambda/revocation-lambda.zip --region ${region}
 
-          aws lambda update-function-code \
-            --function-name zeroverify-revocation \
-            --s3-bucket ${bucket_name} \
-            --s3-key lambda/revocation-lambda.zip \
-            --region us-east-1
-
-          echo "Successfully deployed revocation lambda"
+            aws lambda update-function-code \
+              --function-name zeroverify-revocation \
+              --s3-bucket ${bucket_name} \
+              --s3-key lambda/revocation-lambda.zip \
+              --region ${region}
+              
+            echo "Successfully deployed to ${region}"
+          done
