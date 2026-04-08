@@ -1,9 +1,8 @@
 package main
 
 import (
-	"github.com/ZeroVerify/revocation-lambda/internal/handler"
-
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/zeroverify/revocation-lambda/internal/handler"
 )
 
 func main() {
