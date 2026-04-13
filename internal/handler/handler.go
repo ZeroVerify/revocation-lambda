@@ -53,6 +53,8 @@ func NewHandler() *Handler {
 }
 
 func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest) (events.APIGatewayV2HTTPResponse, error) {
+	log.Printf("INFO: %s %s", req.RequestContext.HTTP.Method, req.RequestContext.HTTP.Path)
+
 	if req.RequestContext.HTTP.Method != http.MethodPost || req.RequestContext.HTTP.Path != "/api/v1/credentials/revoke" {
 		return errResponse(http.StatusNotFound, "not_found", "endpoint not found"), nil
 	}
@@ -66,15 +68,17 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		return errResponse(http.StatusBadRequest, "invalid_request", "missing required fields"), nil
 	}
 
+	log.Printf("INFO: revocation requested subject=%s credential=%s", body.SubjectID, body.CredentialID)
+
 	vkJSON, err := h.fetcher.VerificationKey(ctx, "credential_revocation")
 	if err != nil {
-		log.Printf("fetching verification key: %v", err)
+		log.Printf("ERROR: fetching verification key: %v", err)
 		return errResponse(http.StatusInternalServerError, "internal_error", "could not fetch verification key"), nil
 	}
 
 	pubKeyHex, err := h.fetcher.BabyJubJubPublicKey(ctx)
 	if err != nil {
-		log.Printf("fetching issuer public key: %v", err)
+		log.Printf("ERROR: fetching issuer public key: %v", err)
 		return errResponse(http.StatusInternalServerError, "internal_error", "could not fetch issuer public key"), nil
 	}
 
@@ -88,11 +92,12 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 		},
 	})
 	if err != nil {
-		log.Printf("verify error: %v", err)
+		log.Printf("ERROR: proof verification failed credential=%s: %v", body.CredentialID, err)
 		return errResponse(http.StatusInternalServerError, "internal_error", "verification failed"), nil
 	}
 
 	if !verifyResult.Valid {
+		log.Printf("WARN: invalid proof credential=%s reason=%s", body.CredentialID, verifyResult.Reason)
 		return errResponse(http.StatusBadRequest, verifyResult.Reason, "proof invalid"), nil
 	}
 
@@ -115,12 +120,14 @@ func (h *Handler) Handle(ctx context.Context, req events.APIGatewayV2HTTPRequest
 	if err != nil {
 		var condErr *types.ConditionalCheckFailedException
 		if errors.As(err, &condErr) {
+			log.Printf("WARN: credential not active subject=%s credential=%s", body.SubjectID, body.CredentialID)
 			return errResponse(http.StatusConflict, "already_revoked", "credential is not active"), nil
 		}
-		log.Printf("dynamo error: %v", err)
+		log.Printf("ERROR: dynamodb update failed credential=%s: %v", body.CredentialID, err)
 		return errResponse(http.StatusInternalServerError, "internal_error", "db update failed"), nil
 	}
 
+	log.Printf("INFO: credential revoked subject=%s credential=%s", body.SubjectID, body.CredentialID)
 	return jsonResponse(http.StatusAccepted, map[string]string{
 		"status": "credential revoked",
 	}), nil
