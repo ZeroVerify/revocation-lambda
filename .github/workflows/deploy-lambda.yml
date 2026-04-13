@@ -3,15 +3,14 @@ name: Deploy Lambda
 on:
   push:
     branches:
-      - master   # CHANGED: was told to deploy ONLY on master (not your branch)
+      - master
 
 permissions:
   id-token: write
   contents: read
 
 env:
-  # Added us-west-2
-  AWS_REGIONS: "us-east-1 us-west-2"
+  AWS_REGIONS: "us-east-1,us-west-2"
 
 jobs:
   deploy:
@@ -38,21 +37,21 @@ jobs:
           role-to-assume: arn:aws:iam::043189681060:role/ZeroVerifyGitHubActionsLambdaDeployment
           aws-region: us-east-1
 
-      - name: Deploy to AWS
+      - name: Deploy to all regions
         run: |
-          # REQUESTED: Implementation of the 'for loop' to iterate over regions
-          for region in ${AWS_REGIONS}; do
-            echo "Processing region: ${region}"
-            
+          IFS=',' read -ra REGIONS <<< "$AWS_REGIONS"
+          for region in "${REGIONS[@]}"; do
+            echo "Deploying to $region..."
+
             bucket_name="zeroverify-deployment-artifacts-${region}"
 
-            aws s3 cp revocation-lambda.zip s3://${bucket_name}/lambda/revocation-lambda.zip --region ${region}
+            aws s3 cp revocation-lambda.zip s3://${bucket_name}/lambda/revocation-lambda.zip --region $region
 
             aws lambda update-function-code \
               --function-name zeroverify-revocation \
               --s3-bucket ${bucket_name} \
               --s3-key lambda/revocation-lambda.zip \
-              --region ${region}
-              
-            echo "Successfully deployed to ${region}"
+              --region $region
+
+            echo "Successfully deployed to $region"
           done
